@@ -1,0 +1,174 @@
+#! /usr/bin/env python3
+
+VERSION_MAJOR, VERSION_MINOR, VERSION_MICRO = 0, 4, 1
+RELEASE_DATE, AUTHOR = "2016-02-11", "ByteCommander"
+
+import sys
+import os
+import shutil
+import subprocess
+import argparse
+
+
+class Printer:
+    def __init__(self, normal=sys.stdout, stat=sys.stderr):
+        self.__normal = normal
+        self.__stat = stat
+        self.__prev_msg = ""
+        self.__first = True
+        self.__max_width = shutil.get_terminal_size().columns
+    def __call__(self, msg, stat=False):
+        if not stat:
+            if not self.__first:
+                print("\r" + " " * len(self.__prev_msg) + "\r", 
+                      end="", file=self.__stat)
+            print(msg, file=self.__normal)
+            print(self.__prev_msg, end="", flush=True, file=self.__stat)
+        else:
+            if len(msg) > self.__max_width:
+                msg = msg[:self.__max_width-3] + "..."
+            if not msg:
+                print("\r" + " " * len(self.__prev_msg) + "\r", 
+                      end="", flush=True, file=self.__stat)
+            elif self.__first:
+                print(msg, end="", flush=True, file=self.__stat)
+                self.__first = False
+            else:
+                print("\r" + " " * len(self.__prev_msg) + "\r", 
+                      end="", file=self.__stat)
+                print("\r" + msg, end="", flush=True, file=self.__stat)
+            self.__prev_msg = msg
+
+
+def file_walker(top, maxdepth=None):
+    dirs, files = [], []
+    for name in os.listdir(top):
+        (dirs if os.path.isdir(os.path.join(top, name)) else files).append(name)
+    yield top, files
+    if maxdepth != 0:
+        for name in dirs:
+            for x in file_walker(os.path.join(top, name), maxdepth-1):
+                yield x
+
+
+printx = Printer()
+argparser = argparse.ArgumentParser(description="Check for duplicate files")
+argparser.add_argument("directory", action="store", default=".", nargs="?",
+                       help="the directory to examine recursively "
+                            "(default '%(default)s')")
+argparser.add_argument("-s", "--hashsum", action="store", default="sha256sum",
+                       metavar="COMMAND", help="external system command to "
+                       "generate hashes (default '%(default)s')")
+argparser.add_argument("-r", "--recursion-depth", action="store", type=int,
+                       default=-1, metavar="MAXDEPTH", 
+                       help="the number of subdirectory levels to process: "
+                       "0=only current directory, 1=max. 1st subdirectory "
+                       "level, ... (default: infinite)")
+arggroupn = argparser.add_mutually_exclusive_group()
+arggroupn.add_argument("-e", "--equal-names", action="store_const", 
+                       const="e", dest="name_filter",
+                       help="only list duplicates with equal file names")
+arggroupn.add_argument("-d", "--different-names", action="store_const",
+                       const="d", dest="name_filter",
+                       help="only list duplicates with different file names")
+argparser.add_argument("-0", "--no-zero", action="store_true", default=False,
+                       help="do not list 0-byte files")
+arggroupo = argparser.add_mutually_exclusive_group()
+arggroupo.add_argument("-v", "--verbose", action="store_const", const=0, 
+                       dest="output_level",
+                       help="print hash and name of each examined file")
+arggroupo.add_argument("-q", "--quiet", action="store_const", const=2, 
+                       dest="output_level",
+                       help="suppress status output on stderr")
+arggroupo.add_argument("-Q", "--list-only", action="store_const", const=3, 
+                       dest="output_level",
+                       help="only list the duplicate files, no summary etc.")
+argparser.add_argument("-g", "--no-groups", action="store_true", default=False,
+                       help="do not group equal duplicates")
+argparser.add_argument("-p", "--path-only", action="store_true", default=False,
+                       help="only print the full path in the results list, "
+                            "otherwise format output like this: "
+                            "`'FILENAME' (FULL_PATH)´")
+argparser.add_argument("-V", "--version", action="version", 
+                       version="%(prog)s {}.{}.{} ({} by {})".format(
+                       VERSION_MAJOR, VERSION_MINOR, VERSION_MICRO, 
+                       RELEASE_DATE, AUTHOR))
+argparser.set_defaults(name_filter="a", output_level=1)
+args = argparser.parse_args()
+
+hashes = {}
+dupe_counter = 0
+file_counter = 0
+try:
+    for root, filenames in file_walker(args.directory, args.recursion_depth):
+        if args.output_level <= 1:
+            printx("--> {} files ({} duplicates) processed - '{}'".format(
+                    file_counter, dupe_counter, root), stat=True)
+        for filename in filenames:
+            path = os.path.join(root, filename)
+            file_counter += 1
+            filehash = subprocess.check_output(
+                       [args.hashsum, path], universal_newlines=True).split()[0]
+            if args.output_level == 0:
+                printx(" ".join((filehash, path)))
+            if filehash in hashes:
+                dupe_counter += 1 if len(hashes[filehash]) > 1 else 2
+                hashes[filehash].append((filename, path))
+                if args.output_level <= 1:
+                    printx("--> {} files ({} duplicates) processed - '{}'"
+                           .format(file_counter, dupe_counter, root), stat=True)
+            else:
+                hashes[filehash] = [(filename, path)]
+except FileNotFoundError:
+    printx("ERROR: Directory not found!")
+    exit(1)
+except KeyboardInterrupt:
+    printx("USER ABORTED SEARCH!")
+    printx("Results so far:")
+
+if args.output_level <= 1:
+    printx("", stat=True)
+    if args.output_level == 0:
+        printx("")
+if args.output_level <= 2:
+    printx("Checked {} files in total, {} of them are duplicates by content."
+            .format(file_counter, dupe_counter))
+
+if dupe_counter == 0:
+    exit(0)
+elif args.output_level <= 2:
+    printx("Here's a list of all duplicate{} files{}:".format(
+            " non-zero-byte" if args.no_zero else "",
+            " with different names" if args.name_filter == "d" else
+            " with equal names" if args.name_filter == "e" else ""))
+
+first_group = True
+for filehash in hashes:
+    if len(hashes[filehash]) > 1:
+        if args.no_zero and os.path.getsize(hashes[filehash][0][0]) == 0:
+            continue
+        first_group = False
+        if args.name_filter == "a":
+            filtered = hashes[filehash]
+        else:
+            filenames = {}
+            for filename, path in hashes[filehash]:
+                if filename in filenames:
+                    filenames[filename].append(path)
+                else:
+                    filenames[filename] = [path]
+            filtered = [(filename, path) 
+                    for filename in filenames if (
+                    args.name_filter == "e" and len(filenames[filename]) > 1 or
+                    args.name_filter == "d" and len(filenames[filename]) == 1)
+                    for path in filenames[filename]]
+        if len(filtered) == 0:
+            continue
+        if (not args.no_groups) and (args.output_level <= 2 or not first_group):
+            printx("")
+        for filename, path in sorted(filtered):
+            if args.path_only:
+                printx(path)
+            else:
+                printx("'{}' ({})".format(filename, path))
+
